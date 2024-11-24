@@ -1,35 +1,49 @@
 import torch
 import numpy as np
-# from evaluation.inference_sps import sps_forward
-from transformers import AutoModelForCausalLM, AutoTokenizer, GenerationMixin
+from transformers import AutoModelForCausalLM, AutoTokenizer, BitsAndBytesConfig
 
-# from run import sps_forward
-from model.sps.decoding_batched import _speculative_sampling
+from model.sps.decoding_batched import sps_forward
+# from model.sps.decoding_batched import _speculative_sampling
 
-from model.sps.decoding import assisted_decoding
+# from model.sps.decoding import assisted_decoding
 from fastchat.utils import str_to_torch_dtype
 from transformers.tokenization_utils_base import BatchEncoding
 
-model_path = "TinyLlama/TinyLlama-1.1B-Chat-v1.0"
-drafter_path = "JackFram/llama-68m"
-device = "cuda:6"
-dtype = "float16"
-temperature = 0.1
-max_new_tokens = 8
+def output_token_by_token(output_ids, tokenizer):
+    print("OUTPUT:")
+    for sample in output_ids:
+        replace_pad = lambda s : s if s != "</s>" else ""
+        print(*[replace_pad(tokenizer.decode(tok)) for tok in sample.cpu()], sep=" ")
+        print("------------------------------")
 
-GenerationMixin.assisted_decoding = assisted_decoding
+
+# "meta-llama/Llama-2-7b-chat-hf" "TheBloke/Llama-2-7B-Chat-GPTQ" "meta-llama/Llama-3.1-8B-Instruct"
+model_path = "meta-llama/Llama-2-7b-chat-hf"
+# model_path = "meta-llama/Llama-3.1-8B-Instruct"
+# "TinyLlama/TinyLlama-1.1B-Chat-v1.0"  "JackFram/llama-68m" "meta-llama/Llama-3.2-1B-Instruct" 
+drafter_path = "TinyLlama/TinyLlama-1.1B-Chat-v1.0"
+# drafter_path = "meta-llama/Llama-3.2-1B-Instruct" 
+
+device = "cuda:4"
+dtype = "float16"
+temperature = 0
+max_new_tokens = 4
 
 model = AutoModelForCausalLM.from_pretrained(
     model_path,
+    quantization_config=BitsAndBytesConfig(load_in_8bit=True),
     torch_dtype=str_to_torch_dtype(dtype),
     low_cpu_mem_usage=True,
-).to(device)
+    device_map = device,
+)
 
 drafter = AutoModelForCausalLM.from_pretrained(
     drafter_path,
+    # quantization_config=BitsAndBytesConfig(load_in_8bit=True),
     torch_dtype=str_to_torch_dtype(dtype),
     low_cpu_mem_usage=True,
-).to(device)
+    device_map = device,
+)
 
 model.eval()
 drafter.eval()
@@ -39,71 +53,51 @@ if temperature > 0:
 else:
     do_sample = False
 tokenizer = AutoTokenizer.from_pretrained(model_path)
+if tokenizer.pad_token is None:
+    tokenizer.add_special_tokens({'pad_token': '</s>'})
+    model.resize_token_embeddings(len(tokenizer))
 pad_token_id = tokenizer.pad_token_id
 
-prompt = [
-            "The capital city of California state is",
-            "What do you think about",
-            "WTF is going on?"
+#  Spaces after prompts
+prompts = [
+            # "The capital city of California state is ",
+            # "What do you think about global warming? ",
+            # "WTF is going on? ",
+            "Tell me a story ",
+            "Continue sequence 1 2 3 4 5 6 ",
+            # "Count from 1 to 10: ",
+            # "9 8 7 6 5 ",
+            # "a b c d "
           ]
-inputs = tokenizer.batch_encode_plus(prompt, 
-                                    add_special_tokens=True,
-                                    # truncation=True, 
-                                    padding=True, 
-                                    return_attention_mask=True, 
-                                    return_tensors="pt",
-                                    pad_to_multiple_of=8).to(device)
+prompt_template=[f'''<s>[INST] <<SYS>>
+You are a helpful, respectful and honest assistant. Always answer as helpfully as possible, while being safe.  Your answers should not include any harmful, unethical, racist, sexist, toxic, dangerous, or illegal content. Please ensure that your responses are socially unbiased and positive in nature.
 
-def sps_forward(inputs, verifier, tokenizer, max_new_tokens, do_sample=False, temperature=0.0, drafter=None):
-    assert drafter is not None
-    input_ids, attention_mask = inputs.input_ids, inputs.attention_mask
-    drafter_outputs = drafter.generate(
-        input_ids=input_ids, attention_mask=attention_mask,
-        max_new_tokens=max_new_tokens - 1,
-        do_sample=do_sample,
-        temperature=temperature,
-        return_dict_in_generate=True,
-        output_logits=True,)
-    # drafter_logits = drafter.compute_transition_scores(
-    #     drafter_outputs.sequences, drafter_outputs.scores, normalize_logits=True
-    # )
-    
-    batch_size, input_len = input_ids.shape
-    # draftedted_tokens = drafter_outputs.sequences[:, input_len:]
+If a question does not make any sense, or is not factually coherent, explain why instead of answering something not correct. If you don't know the answer to a question, please don't share false information.
+<</SYS>>
 
-    attention_mask_ver = torch.cat((attention_mask,
-                                torch.ones((batch_size, max_new_tokens - 1)).to(device)), 1)
-    verifier_outputs = verifier(drafter_outputs.sequences, attention_mask=attention_mask_ver)
+{prompt} [/INST]''' for prompt in prompts]
 
-    # last_assistant_token_is_eos = (
-    #         ~draftedted_tokens[:, -1]
-    #         .tile(eos_token_id_tensor.shape[0], 1)
-    #         .ne(eos_token_id_tensor.unsqueeze(1))
-    #         .prod(dim=0)
-    #         .bool()
-    #     )
-    
-    valid_tokens, n_matches = _speculative_sampling(
-        drafter_outputs.sequences,
-        torch.stack(drafter_outputs.logits, dim=1),
-        max_new_tokens - 1,
-        verifier_outputs.logits[:, 1-max_new_tokens:],
-        None,
-        max_new_tokens,
-    )
-    output_ids = torch.cat((input_ids, valid_tokens), dim=-1)
-    new_token, idx, accept_length_list = None, None, None
-    return output_ids, new_token, idx+1, accept_length_list
+inputs = tokenizer( prompts, 
+                        add_special_tokens=True,
+                        # truncation=True, 
+                        padding="longest", 
+                        return_attention_mask=True, 
+                        return_tensors="pt",
+                        padding_side="right").to(device)
+input_ids, attention_mask = inputs.input_ids, inputs.attention_mask
 
-output_ids, step, accept_length_tree = sps_forward(
-                        inputs,
-                        model,
-                        tokenizer,
-                        max_new_tokens,
-                        do_sample=do_sample,
-                        temperature=temperature,
-                        drafter=drafter
-                    )
-print("OUTPUT:")
-for sample in output_ids.cpu():
-    print("OUTPUT:", *[tokenizer.decode(sample) for sample in output_ids.cpu()], sep="\n")
+for _ in range(3):
+    input_ids, step, _, accept_length_tree, attention_mask = sps_forward(
+                            # inputs,
+                            input_ids, attention_mask,
+                            model,
+                            tokenizer,
+                            max_new_tokens,
+                            drafter=drafter,
+                            do_sample=do_sample,
+                            temperature=temperature,
+                        )
+
+    output_token_by_token(input_ids, tokenizer)
+    print(accept_length_tree)
+
