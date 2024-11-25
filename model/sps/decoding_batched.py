@@ -13,9 +13,8 @@ def attention_mask_4d(attention_mask_2d):
 
 
 def temperature_scaled_softmax(logits, temperature=1.0, dim=0):
-    temperature = max(1e-3, temperature)
-    logits = logits / temperature
-    return torch.softmax(logits, dim=dim)
+    res = torch.softmax(logits / max(temperature, 1e-3), dim=dim)
+    return res
 
 @torch.no_grad()
 def sps_forward(
@@ -39,44 +38,23 @@ def sps_forward(
         return_dict_in_generate=True,
         output_scores=True)
     drafter_input_ids, drafter_logits = drafter_outputs.sequences, torch.stack(drafter_outputs.scores, dim=1)
-
-    # print("DRAFTER:")
-    # for sample in drafter_input_ids:
-    #     print(*[tokenizer.decode(tok) for tok in sample.cpu()], sep=" ")
-    #     print("--------")
-
-
+    drafter_length = drafter_logits.shape[1]
 
     verifier_attention_mask = torch.cat((drafter_attention_mask,
                                 torch.ones((batch_size, max_new_tokens)).to(device)), 1)
     verifier_position_ids = torch.cumsum(verifier_attention_mask, dim=-1)
     verifier_logits = verifier( drafter_input_ids,
-                                attention_mask=attention_mask_4d(verifier_attention_mask),
+                                attention_mask=verifier_attention_mask,
                                 position_ids=verifier_position_ids,
                                 do_sample=do_sample,
                                 temperature=temperature,
-                                ).logits[:, -1-max_new_tokens:-1, :]                                    
+                                ).logits                                    
 
-    # verifier_outputs = verifier.generate(
-    #         input_ids=drafter_input_ids,
-    #         attention_mask=verifier_attention_mask,
-    #         position_ids=verifier_position_ids,
-    #         do_sample=do_sample,
-    #         temperature=temperature,
-    #         max_new_tokens=max_new_tokens-1,
-    #         return_dict_in_generate=True,
-    #         output_scores=True)
-    # print("VERIFIER:")
-    # for sample in verifier_outputs.sequences:
-    #     print(*[tokenizer.decode(tok) for tok in sample.cpu()], sep=" ")
-    #     print("--------")
-
-    drafter_length = drafter_logits.shape[1]
     _, n_matches, free_token = _speculative_sampling(
                 drafter_input_ids,
                 drafter_logits,
                 drafter_length,
-                verifier_logits,
+                verifier_logits[:, -1-max_new_tokens:-1, :],
                 max_new_tokens-1,
                 do_sample=do_sample,
                 temperature=temperature,
@@ -114,9 +92,11 @@ def _speculative_sampling(
     
     new_candidate_input_ids = candidate_input_ids[:, -candidate_length:]
 
+    assert not candidate_logits.isnan().any()
     q = temperature_scaled_softmax(candidate_logits, temperature, dim=-1)
     q_i = torch.gather(q, 2, new_candidate_input_ids[:, :, None]).squeeze(-1) #q[:, torch.arange(candidate_length), new_candidate_input_ids]
 
+    assert not new_logits.isnan().any()
     p = temperature_scaled_softmax(new_logits, temperature, dim=-1)
     p_i = torch.gather(p, 2, new_candidate_input_ids[:, :, None]).squeeze(-1) #p[:, torch.arange(candidate_length), new_candidate_input_ids]
 

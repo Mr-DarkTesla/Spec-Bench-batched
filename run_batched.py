@@ -14,7 +14,7 @@ def output_token_by_token(output_ids, tokenizer):
     print("OUTPUT:")
     for sample in output_ids:
         # replace_pad = lambda s : s if s != "</s>" else ""
-        print(tokenizer.decode(sample.cpu()))
+        print(tokenizer.decode(sample.cpu()).replace(pad_token, "").split("</s>")[0])
         print("------------------------------")
 
 
@@ -25,7 +25,7 @@ model_path = "meta-llama/Llama-2-7b-chat-hf"
 drafter_path = "TinyLlama/TinyLlama-1.1B-Chat-v1.0"
 # drafter_path = "meta-llama/Llama-3.2-1B-Instruct" 
 
-device = "cuda:1"
+device = "cuda:4"
 dtype = "float16"
 temperature = 0
 max_new_tokens = 4
@@ -59,11 +59,11 @@ else:
     do_sample = False
 tokenizer = AutoTokenizer.from_pretrained(model_path)
 if tokenizer.pad_token is None:
-    tokenizer.add_special_tokens({'pad_token': '</s>'})
+    pad_token = "<s>"
+    tokenizer.add_special_tokens({'pad_token': pad_token})
     model.resize_token_embeddings(len(tokenizer))
 pad_token_id = tokenizer.pad_token_id
 
-#  Spaces after prompts
 # prompts = [
 #             # "What is the capital city of California state?",
 #             # "What do you think about global warming?",
@@ -82,17 +82,14 @@ prompts = [
     "Translate German to English: Als Zeuge war der damals ermittelnde Kommissar geladen .",
     "Translate German to English: Je dunkler das Fleisch , desto höher der ph-Wert .",
 ]
-# texts = [
-#     "Who played Anna in Once Upon a Time?",
-#     "Where was the 2015 rugby union world cup held?",
-#     "Who plays young Damon in The Vampire Diaries?",
-#     "What kind of bird is in the Lion King?",
-#     "When was the movie Cool Hand Luke made?"
-# ]
-# texts = ["How much is 2+2?", "What is th capital of USA?", "Hello, how are you?"] 
-
+# SPACE IN THE END IS IMPORTANT FOR SPECBENCH SPS
 prompt_template=[f"[INST] {prompt} [/INST]" for prompt in prompts]
 
+iterations = 15
+
+
+# My batched sps
+print("\nMy SPS:")
 inputs = tokenizer( prompt_template, 
                         add_special_tokens=True,
                         # truncation=True, 
@@ -102,7 +99,7 @@ inputs = tokenizer( prompt_template,
                         padding_side="right").to(device)
 input_ids, attention_mask = inputs.input_ids, inputs.attention_mask
 
-for _ in range(15):
+for _ in range(iterations):
     input_ids, step, _, accept_length_tree, attention_mask = sps_forward(
                             input_ids, attention_mask,
                             model,
@@ -116,9 +113,11 @@ for _ in range(15):
 output_token_by_token(input_ids, tokenizer)
 
 
+# # Original sps frmo spec bench
+# print("\nOriginal SPS frmo spec bench:")
 # for prompt in prompt_template:
 #     inputs = tokenizer([prompt], return_tensors="pt").to(device).input_ids
-#     for i in range(50):
+#     for i in range(iterations):
 #         inputs = sps_forward_test(
 #                     inputs,
 #                     model,
@@ -127,5 +126,16 @@ output_token_by_token(input_ids, tokenizer)
 #                     drafter=drafter,
 #                     do_sample=do_sample,
 #                     temperature=temperature)
-#     print(tokenizer.decode(inputs[0]).split("</s>")[0])
-#     print("---------------")
+#     output_token_by_token(inputs, tokenizer)
+
+# Just model 
+print("\nModel Generation:")
+for prompt in prompt_template:
+    inputs = tokenizer([prompt], return_tensors="pt").to(device).input_ids
+    for i in range(2 * iterations):
+        inputs = model.generate(
+        inputs,
+        max_new_tokens=max_new_tokens,
+        do_sample=do_sample,
+        temperature=temperature)
+    output_token_by_token(inputs, tokenizer)
