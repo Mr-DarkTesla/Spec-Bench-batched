@@ -47,7 +47,7 @@ if __name__ == "__main__":
     parser.add_argument(
         "--max-new-tokens",
         type=int,
-        default=1024,
+        default=128, # CHANGED
         help="The maximum number of new generated tokens.",
     )
     parser.add_argument(
@@ -82,14 +82,14 @@ if __name__ == "__main__":
         "--model-quantization",
         type=str,
         default="no",
-        choices=["no", "8bit", "4bit"],
+        choices=["no", "4bit"],
         help="Bits and bytes quantization.",
     )
     parser.add_argument(
         "--drafter-quantization",
         type=str,
         default="no",
-        choices=["no", "8bit", "4bit"],
+        choices=["no", "4bit"],
         help="Bits and bytes quantization.",
     )
     args = parser.parse_args()
@@ -102,7 +102,7 @@ if __name__ == "__main__":
 
     print(f"Output to {answer_file}")
     # TODO add quantization as arg
-    model_quantization_config = BitsAndBytesConfig(load_in_8bit=True)
+    model_quantization_config = BitsAndBytesConfig(load_in4bit=True)
     model = AutoModelForCausalLM.from_pretrained(
         args.model_path,
         torch_dtype=str_to_torch_dtype(args.dtype),
