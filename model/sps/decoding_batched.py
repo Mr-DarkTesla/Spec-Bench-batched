@@ -1,12 +1,13 @@
 import torch
 
-def temperature_scaled_softmax(logits, temperature=0.0, dim=0):
+def temperature_scaled_softmax(logits, temperature=1.0, dim=0):
     assert not logits.isnan().any()
-    # if temperature > 0:
-    temperature = max(temperature, 1e-3)
-    res = torch.softmax(logits / temperature, dim=dim)
-    # else:
-    #     res = torch.argmax(logits, dim=dim)
+    if temperature > 0:
+        # temperature = max(temperature, 1e-3)
+        res = torch.softmax(logits / temperature, dim=dim)
+    else:
+        max_logits = torch.max(logits, dim=dim, keepdim=True)[0]
+        res = logits.ge(max_logits).to(dtype=logits.dtype)
     return res
 
 def check_mask(ids, mask, token_id):
@@ -61,7 +62,7 @@ def sps_forward(
     eos_token_id = tokenizer.eos_token_id
     device = input_ids.device
 
-    check_mask(input_ids, drafter_attention_mask, pad_token_id)
+    # check_mask(input_ids, drafter_attention_mask, pad_token_id)
 
     # sps_sampling -> output_ids, idx, accept_length_list
     drafter_outputs = drafter.generate(
@@ -76,6 +77,9 @@ def sps_forward(
     drafter_input_ids, drafter_logits = drafter_outputs.sequences, torch.stack(drafter_outputs.scores, dim=1).to(dtype=drafter.dtype)
     drafter_length = drafter_logits.shape[1]
 
+    # FIX for nans in verifier while drafter_ids: [... 2 0 0 0]
+    drafter_input_ids = drafter_input_ids + (drafter_input_ids == 0).to(device, dtype=drafter_input_ids.dtype) * eos_token_id
+
     verifier_attention_mask = torch.cat((drafter_attention_mask,
                                 torch.ones((batch_size, max_new_tokens)).to(device)), 1)
     verifier_position_ids = torch.cumsum(verifier_attention_mask, dim=-1)
@@ -86,13 +90,12 @@ def sps_forward(
                                 do_sample=do_sample,
                                 temperature=temperature,
                                 ).logits
-    # print(verifier_attention_mask[:, -2*max_new_tokens:])
-    # print(drafter_input_ids[:, -2*max_new_tokens:])
-    # print(verifier_logits[:, -1-max_new_tokens:, :])
-    # print(torch.softmax(verifier_logits[:, -2, :], dim=-1))
-    # print(torch.argmax(verifier_logits[:, -2, :], dim=-1))
-    assert not verifier_logits.isnan().any()
-    # breakpoint()
+    if verifier_logits.isnan().any():
+        print(verifier_attention_mask[:, -2*max_new_tokens:])
+        print(drafter_input_ids[:, -2*max_new_tokens:])
+        print(verifier_logits[:, -1-max_new_tokens:, :])
+        breakpoint()
+
     n_matches, free_token = _speculative_sampling(
                 drafter_input_ids,
                 drafter_logits,
@@ -126,7 +129,7 @@ def sps_forward(
 
     finished = ((output_ids == eos_token_id).sum(dim=-1) > 0)
     attention_mask = torch.cat((attention_mask, torch.ones((batch_size, 1)).to(device, dtype=int)), dim=1)
-    check_mask(output_ids, attention_mask, pad_token_id)
+    # check_mask(output_ids, attention_mask, pad_token_id)
     return output_ids, n_matches, attention_mask, finished
 
 

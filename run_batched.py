@@ -55,7 +55,7 @@ drafter_path = "TinyLlama/TinyLlama-1.1B-Chat-v1.0"
 device = "cuda:0"
 dtype = "float16"
 temperature = 0
-max_new_tokens = 30
+max_new_tokens = 128
 
 model = AutoModelForCausalLM.from_pretrained(
     model_path,
